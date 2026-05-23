@@ -1,3 +1,5 @@
+import { createHash } from "crypto";
+
 export interface NormalizedMessage {
   id: string;
   role: "user" | "assistant" | "system" | "tool";
@@ -14,14 +16,21 @@ export interface NormalizedConversation {
   updatedAt: number | null;
 }
 
-function hashString(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash = hash & hash;
-  }
-  return Math.abs(hash).toString(16);
+export function sha256(str: string): string {
+  return createHash("sha256").update(str, "utf8").digest("hex");
+}
+
+function deterministicExternalId(
+  provider: string,
+  title: string,
+  createdAt: number | null,
+  updatedAt: number | null,
+  messages: NormalizedMessage[]
+): string {
+  const firstMsgHash = messages[0]?.contentHash ?? "";
+  const msgCount = String(messages.length);
+  const input = [provider, title, String(createdAt ?? ""), String(updatedAt ?? ""), firstMsgHash, msgCount].join("|");
+  return `det:${sha256(input).slice(0, 32)}`;
 }
 
 function extractTextContent(content: unknown): string {
@@ -50,9 +59,7 @@ function extractTextContent(content: unknown): string {
   return "";
 }
 
-function mapRole(
-  role: string
-): "user" | "assistant" | "system" | "tool" {
+function mapRole(role: string): "user" | "assistant" | "system" | "tool" {
   switch (role) {
     case "user":
       return "user";
@@ -68,9 +75,7 @@ function mapRole(
   }
 }
 
-export function parseChatGPTExport(
-  raw: unknown
-): NormalizedConversation[] {
+export function parseChatGPTExport(raw: unknown): NormalizedConversation[] {
   if (!Array.isArray(raw)) {
     throw new Error("ChatGPT export must be a JSON array");
   }
@@ -81,8 +86,8 @@ export function parseChatGPTExport(
     if (!conv || typeof conv !== "object") continue;
 
     const c = conv as Record<string, unknown>;
-    const externalId =
-      typeof c["id"] === "string" ? c["id"] : String(Math.random());
+
+    const rawId = typeof c["id"] === "string" && c["id"].trim() ? c["id"].trim() : null;
     const title =
       typeof c["title"] === "string" && c["title"].trim()
         ? c["title"].trim()
@@ -108,7 +113,6 @@ export function parseChatGPTExport(
         }
       }
 
-      const ordered: NormalizedMessage[] = [];
       let currentId: string | null = null;
       for (const node of nodes) {
         if (node && typeof node === "object") {
@@ -131,25 +135,24 @@ export function parseChatGPTExport(
         const msg = node["message"] as Record<string, unknown> | null;
         if (msg) {
           const msgContent = msg["content"] as Record<string, unknown> | null;
-          const role = typeof msg["author"] === "object" && msg["author"]
-            ? ((msg["author"] as Record<string, unknown>)["role"] as string) || "assistant"
-            : "assistant";
+          const role =
+            typeof msg["author"] === "object" && msg["author"]
+              ? ((msg["author"] as Record<string, unknown>)["role"] as string) || "assistant"
+              : "assistant";
           const contentParts = msgContent
             ? extractTextContent(msgContent["parts"] || msgContent)
             : "";
 
           if (contentParts.trim()) {
             const msgId =
-              typeof msg["id"] === "string" ? msg["id"] : currentId;
+              typeof msg["id"] === "string" ? msg["id"] : visited.size.toString();
             const ts =
-              typeof msg["create_time"] === "number"
-                ? msg["create_time"]
-                : null;
-            ordered.push({
+              typeof msg["create_time"] === "number" ? msg["create_time"] : null;
+            messages.push({
               id: msgId,
               role: mapRole(role),
               content: contentParts,
-              contentHash: hashString(contentParts),
+              contentHash: sha256(contentParts),
               timestamp: ts,
             });
           }
@@ -162,9 +165,10 @@ export function parseChatGPTExport(
           currentId = null;
         }
       }
-
-      messages.push(...ordered);
     }
+
+    const externalId =
+      rawId ?? deterministicExternalId("chatgpt", title, createdAt, updatedAt, messages);
 
     conversations.push({
       externalId,

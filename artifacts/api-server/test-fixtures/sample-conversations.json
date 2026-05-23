@@ -1,0 +1,82 @@
+[
+  {
+    "id": "conv-fixture-001",
+    "title": "Fixture Conversation Alpha",
+    "create_time": 1700000000,
+    "update_time": 1700001000,
+    "mapping": {
+      "root-node": {
+        "id": "root-node",
+        "parent": null,
+        "children": ["msg-001"],
+        "message": null
+      },
+      "msg-001": {
+        "id": "msg-001",
+        "parent": "root-node",
+        "children": ["msg-002"],
+        "message": {
+          "id": "msg-001",
+          "author": { "role": "user" },
+          "create_time": 1700000100,
+          "content": {
+            "parts": ["Hello, what is 2 + 2?"]
+          }
+        }
+      },
+      "msg-002": {
+        "id": "msg-002",
+        "parent": "msg-001",
+        "children": [],
+        "message": {
+          "id": "msg-002",
+          "author": { "role": "assistant" },
+          "create_time": 1700000200,
+          "content": {
+            "parts": ["2 + 2 equals 4."]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "conv-fixture-002",
+    "title": "Fixture Conversation Beta",
+    "create_time": 1700002000,
+    "update_time": 1700003000,
+    "mapping": {
+      "root-node": {
+        "id": "root-node",
+        "parent": null,
+        "children": ["msg-101"],
+        "message": null
+      },
+      "msg-101": {
+        "id": "msg-101",
+        "parent": "root-node",
+        "children": ["msg-102"],
+        "message": {
+          "id": "msg-101",
+          "author": { "role": "user" },
+          "create_time": 1700002100,
+          "content": {
+            "parts": ["What is the capital of France?"]
+          }
+        }
+      },
+      "msg-102": {
+        "id": "msg-102",
+        "parent": "msg-101",
+        "children": [],
+        "message": {
+          "id": "msg-102",
+          "author": { "role": "assistant" },
+          "create_time": 1700002200,
+          "content": {
+            "parts": ["The capital of France is Paris."]
+          }
+        }
+      }
+    }
+  }
+]
