@@ -358,6 +358,11 @@ export async function customFetch<T = unknown>(
     }
   }
 
+  // Fallback to window.__supabaseToken if explicitly set
+  if (!headers.has("authorization") && typeof window !== "undefined" && (window as any).__supabaseToken) {
+    headers.set("authorization", `Bearer ${(window as any).__supabaseToken}`);
+  }
+
   const requestInfo = { method, url: resolveUrl(input) };
 
   const response = await fetch(input, { ...init, method, headers });

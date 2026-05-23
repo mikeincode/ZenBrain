@@ -3,20 +3,27 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: ZenBrain API - AI Memory Vault
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: profiles
+    description: Provider profiles
+  - name: import
+    description: Import operations
+  - name: conversations
+    description: Conversation operations
+  - name: library
+    description: Library browsing
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,13 +31,518 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /profiles:
+    get:
+      operationId: listProfiles
+      tags: [profiles]
+      summary: List all profiles for the authenticated user
+      parameters:
+        - name: provider
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of profiles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Profile"
+    post:
+      operationId: createProfile
+      tags: [profiles]
+      summary: Create a new provider profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfileInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Profile"
+
+  /profiles/{profileId}:
+    get:
+      operationId: getProfile
+      tags: [profiles]
+      summary: Get a profile by ID
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Profile"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateProfile
+      tags: [profiles]
+      summary: Update a profile
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfilePatch"
+      responses:
+        "200":
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Profile"
+    delete:
+      operationId: deleteProfile
+      tags: [profiles]
+      summary: Delete a profile
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+
+  /profiles/{profileId}/stats:
+    get:
+      operationId: getProfileStats
+      tags: [profiles]
+      summary: Get stats for a profile (total conversations, messages, last import)
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Profile stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileStats"
+
+  /import:
+    post:
+      operationId: startImport
+      tags: [import]
+      summary: Start an import run (upload and parse a provider export file)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportRequest"
+      responses:
+        "200":
+          description: Import report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportReport"
+
+  /import/runs:
+    get:
+      operationId: listImportRuns
+      tags: [import]
+      summary: List import runs for a profile
+      parameters:
+        - name: profileId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of import runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ImportRun"
+
+  /conversations:
+    get:
+      operationId: listConversations
+      tags: [conversations]
+      summary: List conversations for a profile
+      parameters:
+        - name: profileId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Paginated conversations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationList"
+
+  /conversations/{conversationId}:
+    get:
+      operationId: getConversation
+      tags: [conversations]
+      summary: Get a single conversation with its markdown content
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Conversation with markdown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationDetail"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateConversation
+      tags: [conversations]
+      summary: Update conversation display title
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationPatch"
+      responses:
+        "200":
+          description: Updated conversation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+    delete:
+      operationId: deleteConversation
+      tags: [conversations]
+      summary: Delete a conversation
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+
+  /conversations/{conversationId}/download:
+    get:
+      operationId: downloadConversation
+      tags: [conversations]
+      summary: Get a signed download URL for a conversation's markdown file
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Download URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadUrl"
+
+  /profiles/{profileId}/download-zip:
+    get:
+      operationId: downloadProfileZip
+      tags: [profiles]
+      summary: Get a signed URL for a zip of all conversations in a profile
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Zip download URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadUrl"
+
+  /library/summary:
+    get:
+      operationId: getLibrarySummary
+      tags: [library]
+      summary: Get summary counts grouped by provider for the home page
+      responses:
+        "200":
+          description: Library summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibrarySummary"
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
         status:
           type: string
-      required:
-        - status
 
+    Profile:
+      type: object
+      required: [id, user_id, provider, name, created_at]
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        provider:
+          type: string
+        name:
+          type: string
+        description:
+          type: ["string", "null"]
+        conversation_count:
+          type: ["integer", "null"]
+        last_import_at:
+          type: ["string", "null"]
+        created_at:
+          type: string
+
+    ProfileInput:
+      type: object
+      required: [provider, name]
+      properties:
+        provider:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+
+    ProfilePatch:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+
+    ProfileStats:
+      type: object
+      required: [conversation_count, message_count]
+      properties:
+        conversation_count:
+          type: integer
+        message_count:
+          type: integer
+        last_import_at:
+          type: ["string", "null"]
+        total_size_bytes:
+          type: ["integer", "null"]
+
+    ImportRequest:
+      type: object
+      required: [profileId, provider]
+      properties:
+        profileId:
+          type: string
+        provider:
+          type: string
+
+    ImportReport:
+      type: object
+      required: [run_id, new_count, updated_count, skipped_count, failed_count, status]
+      properties:
+        run_id:
+          type: string
+        new_count:
+          type: integer
+        updated_count:
+          type: integer
+        skipped_count:
+          type: integer
+        failed_count:
+          type: integer
+        status:
+          type: string
+        errors:
+          type: array
+          items:
+            type: string
+        duration_ms:
+          type: ["integer", "null"]
+
+    ImportRun:
+      type: object
+      required: [id, profile_id, provider, status, created_at]
+      properties:
+        id:
+          type: string
+        profile_id:
+          type: string
+        provider:
+          type: string
+        status:
+          type: string
+        new_count:
+          type: ["integer", "null"]
+        updated_count:
+          type: ["integer", "null"]
+        skipped_count:
+          type: ["integer", "null"]
+        failed_count:
+          type: ["integer", "null"]
+        created_at:
+          type: string
+        completed_at:
+          type: ["string", "null"]
+
+    Conversation:
+      type: object
+      required: [id, profile_id, provider, display_title, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        profile_id:
+          type: string
+        provider:
+          type: string
+        display_title:
+          type: string
+        external_id:
+          type: ["string", "null"]
+        message_count:
+          type: ["integer", "null"]
+        storage_path:
+          type: ["string", "null"]
+        created_at:
+          type: string
+        updated_at:
+          type: string
+
+    ConversationDetail:
+      type: object
+      required: [id, profile_id, provider, display_title, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        profile_id:
+          type: string
+        provider:
+          type: string
+        display_title:
+          type: string
+        external_id:
+          type: ["string", "null"]
+        message_count:
+          type: ["integer", "null"]
+        storage_path:
+          type: ["string", "null"]
+        markdown_content:
+          type: ["string", "null"]
+        created_at:
+          type: string
+        updated_at:
+          type: string
+
+    ConversationPatch:
+      type: object
+      properties:
+        display_title:
+          type: string
+
+    ConversationList:
+      type: object
+      required: [conversations, total, page, limit]
+      properties:
+        conversations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Conversation"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    DownloadUrl:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+        expires_at:
+          type: ["string", "null"]
+
+    LibrarySummary:
+      type: object
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderSummary"
+        total_conversations:
+          type: integer
+        total_profiles:
+          type: integer
+
+    ProviderSummary:
+      type: object
+      required: [provider, profile_count, conversation_count]
+      properties:
+        provider:
+          type: string
+        profile_count:
+          type: integer
+        conversation_count:
+          type: integer
+        last_import_at:
+          type: ["string", "null"]
