@@ -20,6 +20,7 @@ const ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const API = "http://localhost:80/api";
 const FIXTURE = join(__dirname, "sample-conversations.json");
+const CLAUDE_FIXTURE = join(__dirname, "sample-claude-conversations.json");
 
 if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
   console.error("Missing required env vars: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY");
@@ -205,9 +206,13 @@ let profileId = "";
 let profileZipId = "";
 let firstConvId = "";
 let alphaConvId = "";
+let claudeProfileId = "";
+let claudeZipProfileId = "";
 
 const fixtureData = readFileSync(FIXTURE);
 const fixtureJson = JSON.parse(fixtureData.toString());
+const claudeFixtureData = readFileSync(CLAUDE_FIXTURE);
+const claudeFixtureJson = JSON.parse(claudeFixtureData.toString());
 
 async function main() {
   // ── Step 1: Sign up / sign in ────────────────────────────────────────────
@@ -420,10 +425,121 @@ async function main() {
     storageData.slice(0, 3).forEach(f => console.log(`  File: ${f.name}`));
   }
 
+  // ── Steps 15–19: Claude import tests ─────────────────────────────────────
+
+  // ── Step 15: Create Claude profile ───────────────────────────────────────
+  console.log("\n=== Step 15: Create Claude profile ===");
+  const { status: s15, data: d15 } = await api("POST", "/profiles", {
+    auth: token, json: { name: "TestClaude", provider: "claude" },
+  });
+  claudeProfileId = d15?.id || "";
+  assertEq("Create Claude profile HTTP 201", s15, 201);
+  assertTruthy("Claude profile ID returned", claudeProfileId, JSON.stringify(d15));
+
+  // ── Step 16: First Claude import (JSON) ───────────────────────────────────
+  console.log("\n=== Step 16: First Claude import (conversations.json) ===");
+  const { status: s16, data: d16 } = await uploadFile(
+    token, claudeProfileId, "claude", claudeFixtureData, "conversations.json", "application/json"
+  );
+  assertEq("Claude import 1 HTTP 200", s16, 200);
+  assertEq("Claude import 1 status=completed", d16?.status, "completed");
+  assertEq("Claude import 1 new_count=2", d16?.new_count, 2);
+  assertEq("Claude import 1 skipped_count=0", d16?.skipped_count, 0);
+  assertEq("Claude import 1 failed_count=0", d16?.failed_count, 0);
+  if (d16?.errors?.length) console.log("  Errors:", d16.errors);
+
+  // Verify DB rows
+  const { data: d16v } = await api("GET", `/conversations?profileId=${claudeProfileId}`, { auth: token });
+  assertEq("Claude: 2 conversations in DB", d16v?.total, 2);
+  const claudeAlphaId = d16v?.conversations?.find(c => c.display_title === "Claude Fixture Conversation Alpha")?.id || "";
+  assertTruthy("Claude alpha ID found", claudeAlphaId);
+  const claudeAllHaveStorage = d16v?.conversations?.every(c => c.storage_path);
+  assertTruthy("Claude: all conversations have storage_path", claudeAllHaveStorage);
+
+  // Verify markdown content
+  const { data: d16md } = await api("GET", `/conversations/${claudeAlphaId}`, { auth: token });
+  assertTruthy("Claude markdown present", d16md?.markdown_content, "null or empty");
+  assertTruthy("Claude markdown starts with # title", d16md?.markdown_content?.startsWith("# Claude Fixture"));
+  assertTruthy("Claude markdown contains provider label", d16md?.markdown_content?.includes("*Provider: Claude*"));
+  assertTruthy("Claude markdown contains **You**", d16md?.markdown_content?.includes("**You**"));
+  assertTruthy("Claude markdown contains **Claude**", d16md?.markdown_content?.includes("**Claude**"));
+  console.log(`  Markdown preview: ${d16md?.markdown_content?.slice(0, 80).replace(/\n/g, "\\n")}...`);
+
+  // ── Step 17: Duplicate Claude import (all skipped) ────────────────────────
+  console.log("\n=== Step 17: Duplicate Claude import (expect all skipped) ===");
+  const { data: d17 } = await uploadFile(
+    token, claudeProfileId, "claude", claudeFixtureData, "conversations.json", "application/json"
+  );
+  assertEq("Claude import 2 status=completed", d17?.status, "completed");
+  assertEq("Claude import 2 new_count=0", d17?.new_count, 0);
+  assertEq("Claude import 2 skipped_count=2", d17?.skipped_count, 2);
+  assertEq("Claude import 2 failed_count=0", d17?.failed_count, 0);
+  const { data: d17v } = await api("GET", `/conversations?profileId=${claudeProfileId}`, { auth: token });
+  assertEq("Claude: still exactly 2 conversations (no duplicates)", d17v?.total, 2);
+
+  // ── Step 18: Modified Claude import (add message to alpha) ───────────────
+  console.log("\n=== Step 18: Modified Claude import (add message to alpha) ===");
+  const claudeModified = JSON.parse(JSON.stringify(claudeFixtureJson));
+  claudeModified[0].chat_messages.push({
+    uuid: "claude-msg-003-e2e",
+    sender: "human",
+    created_at: "2024-01-15T10:40:00.000000+00:00",
+    updated_at: "2024-01-15T10:40:00.000000+00:00",
+    text: "What about Planck's constant?",
+    content: [{ type: "text", text: "What about Planck's constant?" }],
+    files: [],
+    attachments: [],
+  });
+  claudeModified[0].updated_at = "2024-01-15T10:40:00.000000+00:00";
+  const claudeModifiedBuf = Buffer.from(JSON.stringify(claudeModified));
+
+  const { data: d18 } = await uploadFile(
+    token, claudeProfileId, "claude", claudeModifiedBuf, "conversations.json", "application/json"
+  );
+  assertEq("Claude import 3 status=completed", d18?.status, "completed");
+  assertEq("Claude import 3 updated_count=1", d18?.updated_count, 1);
+  assertEq("Claude import 3 skipped_count=1", d18?.skipped_count, 1);
+  assertEq("Claude import 3 new_count=0", d18?.new_count, 0);
+
+  // ── Step 18b: Re-import modified — no duplicates ──────────────────────────
+  console.log("\n=== Step 18b: Re-import modified Claude — no duplicate messages ===");
+  const { data: d18b } = await uploadFile(
+    token, claudeProfileId, "claude", claudeModifiedBuf, "conversations.json", "application/json"
+  );
+  assertEq("Claude import 3b new_count=0", d18b?.new_count, 0);
+  assertEq("Claude import 3b updated_count=0", d18b?.updated_count, 0);
+  assertEq("Claude import 3b skipped_count=2", d18b?.skipped_count, 2);
+
+  const { data: d18c } = await api("GET", `/conversations/${claudeAlphaId}`, { auth: token });
+  assertTruthy("Claude alpha has 3 messages after update", (d18c?.message_count ?? 0) >= 3, `got ${d18c?.message_count}`);
+
+  // ── Step 19: Claude ZIP import ────────────────────────────────────────────
+  console.log("\n=== Step 19: Claude ZIP import (conversations.json inside nested folder) ===");
+  const claudeZipBuf = buildZip([
+    { name: "claude-export-2024/conversations.json", data: claudeFixtureData },
+  ]);
+
+  const { status: s19p, data: d19p } = await api("POST", "/profiles", {
+    auth: token, json: { name: "TestClaude-ZIP", provider: "claude" },
+  });
+  claudeZipProfileId = d19p?.id || "";
+  assertTruthy("Claude ZIP profile created", claudeZipProfileId, JSON.stringify(d19p));
+
+  const { status: s19, data: d19 } = await uploadFile(
+    token, claudeZipProfileId, "claude", claudeZipBuf, "claude-export.zip", "application/zip"
+  );
+  assertEq("Claude ZIP import HTTP 200", s19, 200);
+  assertEq("Claude ZIP import status=completed", d19?.status, "completed");
+  assertEq("Claude ZIP import new_count=2", d19?.new_count, 2);
+  assertEq("Claude ZIP import failed_count=0", d19?.failed_count, 0);
+  if (d19?.errors?.length) console.log("  Claude ZIP errors:", d19.errors);
+
   // ── Step 14: Cleanup ──────────────────────────────────────────────────────
   console.log("\n=== Step 14: Cleanup ===");
   await api("DELETE", `/profiles/${profileId}`, { auth: token });
   await api("DELETE", `/profiles/${profileZipId}`, { auth: token });
+  await api("DELETE", `/profiles/${claudeProfileId}`, { auth: token });
+  await api("DELETE", `/profiles/${claudeZipProfileId}`, { auth: token });
   pass("Profiles deleted (cascades conversations + messages)");
 
   // ── Summary ───────────────────────────────────────────────────────────────

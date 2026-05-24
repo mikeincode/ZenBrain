@@ -10,6 +10,7 @@ import {
   type NormalizedConversation,
   type NormalizedMessage,
 } from "../lib/chatgpt-parser";
+import { parseClaudeExport, claudeConversationToMarkdown } from "../lib/claude-parser";
 import { ListImportRunsQueryParams } from "@workspace/api-zod";
 
 const router: IRouter = Router();
@@ -169,6 +170,8 @@ router.post(
       let conversations: NormalizedConversation[] = [];
       if (provider === "chatgpt") {
         conversations = parseChatGPTExport(parsed);
+      } else if (provider === "claude") {
+        conversations = parseClaudeExport(parsed);
       } else {
         throw new Error(`Provider '${provider}' is not yet supported`);
       }
@@ -187,7 +190,10 @@ router.post(
             .eq("external_id", externalId)
             .single();
 
-          const markdown = conversationToMarkdown(conv);
+          const markdown =
+            provider === "claude"
+              ? claudeConversationToMarkdown(conv)
+              : conversationToMarkdown(conv);
           const markdownBuffer = Buffer.from(markdown, "utf-8");
 
           let conversationId: string;
