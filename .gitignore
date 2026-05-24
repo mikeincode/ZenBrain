@@ -54,3 +54,14 @@ Thumbs.db
 .env.local
 .env.*.local
 *.env
+
+# Real user export data — never commit personal Takeout or AI export files
+Takeout*.zip
+*takeout*.zip
+*.takeout.zip
+*MyActivity-real*.html
+private/
+private-exports/
+local-exports/
+real-exports/
+test-fixtures/private/
