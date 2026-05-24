@@ -83,21 +83,30 @@ function dedupeMessages(
   incoming: NormalizedMessage[],
   existing: ExistingMsgRef[]
 ): NormalizedMessage[] {
-  const seen = new Set<string>();
-
+  // Cross-import dedup: build id and hash sets from rows already in the DB.
+  // A message is skipped if its id OR content hash already exists there.
+  // Hash matching handles the edge case where IDs differ between exports but
+  // the content is identical (e.g. provider reformats IDs).
+  const existingIds = new Set<string>();
+  const existingHashes = new Set<string>();
   for (const m of existing) {
-    if (m.external_id) seen.add(`id:${m.external_id}`);
-    if (m.content_hash) seen.add(`hash:${m.content_hash}`);
+    if (m.external_id) existingIds.add(`id:${m.external_id}`);
+    if (m.content_hash) existingHashes.add(`hash:${m.content_hash}`);
   }
 
+  // Within-batch dedup: by ID only.
+  // Deliberately does NOT deduplicate by hash within the batch so that a
+  // conversation with two legitimately identical messages (same role, same
+  // text at different positions) correctly preserves both.
+  const batchIds = new Set<string>();
   const result: NormalizedMessage[] = [];
   for (const m of incoming) {
     const idKey = `id:${m.id}`;
     const hashKey = `hash:${m.contentHash}`;
-    if (seen.has(idKey) || seen.has(hashKey)) continue;
+    if (existingIds.has(idKey) || existingHashes.has(hashKey)) continue;
+    if (batchIds.has(idKey)) continue;
     result.push(m);
-    seen.add(idKey);
-    seen.add(hashKey);
+    batchIds.add(idKey);
   }
   return result;
 }

@@ -92,9 +92,23 @@ export function parseClaudeExport(raw: unknown): NormalizedConversation[] {
 
     const messages: NormalizedMessage[] = [];
 
+    // Stable conversation key for message fallback IDs.
+    // If the conversation has a uuid, use it directly.
+    // Otherwise derive one from title + created_at so it is stable across re-imports.
+    const convKey =
+      typeof c["uuid"] === "string" && c["uuid"].trim()
+        ? c["uuid"].trim()
+        : sha256(
+            [
+              typeof c["name"] === "string" ? c["name"] : "",
+              typeof c["created_at"] === "string" ? c["created_at"] : "",
+            ].join("|")
+          ).slice(0, 16);
+
     const chatMessages = c["chat_messages"];
     if (Array.isArray(chatMessages)) {
-      for (const rawMsg of chatMessages) {
+      for (let msgIdx = 0; msgIdx < chatMessages.length; msgIdx++) {
+        const rawMsg = chatMessages[msgIdx];
         if (!rawMsg || typeof rawMsg !== "object") continue;
         const m = rawMsg as Record<string, unknown>;
 
@@ -110,9 +124,24 @@ export function parseClaudeExport(raw: unknown): NormalizedConversation[] {
 
         if (!content.trim()) continue;
 
-        // If no uuid present, derive a stable ID from role+content so re-imports
-        // still deduplicate correctly (no Math.random).
-        const id = msgId ?? sha256(`claude|${role}|${content}`).slice(0, 32);
+        // Fallback ID when no uuid is present.
+        // Incorporates: provider prefix, conversation key, role, array index,
+        // ISO timestamp (if present), and content hash.
+        // Using the array index makes two identical messages at different
+        // positions in the same conversation produce distinct IDs, preventing
+        // valid repeated messages from being collapsed during dedup.
+        const id =
+          msgId ??
+          sha256(
+            [
+              "claude",
+              convKey,
+              role,
+              String(msgIdx),
+              typeof m["created_at"] === "string" ? m["created_at"] : "",
+              sha256(content),
+            ].join("|")
+          ).slice(0, 32);
 
         messages.push({
           id,

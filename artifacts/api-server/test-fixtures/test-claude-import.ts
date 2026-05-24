@@ -54,17 +54,25 @@ function dedupeMessages(
   incoming: Array<{ id: string; contentHash: string; role: string; content: string }>,
   existing: Array<{ external_id: string; content_hash: string }>
 ) {
-  const seen = new Set<string>();
+  // Mirror the production logic in import.ts: dedupeMessages.
+  // Cross-import: skip if id OR hash already exists in DB.
+  // Within-batch: skip only if the exact same id appears twice (preserves
+  // repeated content at different positions).
+  const existingIds = new Set<string>();
+  const existingHashes = new Set<string>();
   for (const m of existing) {
-    if (m.external_id) seen.add(`id:${m.external_id}`);
-    if (m.content_hash) seen.add(`hash:${m.content_hash}`);
+    if (m.external_id) existingIds.add(`id:${m.external_id}`);
+    if (m.content_hash) existingHashes.add(`hash:${m.content_hash}`);
   }
+  const batchIds = new Set<string>();
   const result = [];
   for (const m of incoming) {
-    if (seen.has(`id:${m.id}`) || seen.has(`hash:${m.contentHash}`)) continue;
+    const idKey = `id:${m.id}`;
+    const hashKey = `hash:${m.contentHash}`;
+    if (existingIds.has(idKey) || existingHashes.has(hashKey)) continue;
+    if (batchIds.has(idKey)) continue;
     result.push(m);
-    seen.add(`id:${m.id}`);
-    seen.add(`hash:${m.contentHash}`);
+    batchIds.add(idKey);
   }
   return result;
 }
@@ -421,6 +429,135 @@ assert(
   db[0].messages.length === 3,
   `got ${db[0].messages.length}`
 );
+
+// ---------------------------------------------------------------------------
+// Tests: repeated identical messages in the same conversation
+// ---------------------------------------------------------------------------
+//
+// Scenario: a conversation where the user asks the same thing twice and the
+// assistant gives the same answer twice (legitimately repeated content, no uuid).
+// All four messages must survive the first import without being collapsed by
+// hash-based dedup.  A subsequent re-import must produce zero new messages.
+
+console.log("\nTest: Repeated identical messages — first import preserves all");
+
+// Inline fixture — no uuid on messages to exercise the fallback ID path.
+const repeatedRaw = [
+  {
+    uuid: "claude-repeat-conv-001",
+    name: "Repeated Messages Conv",
+    created_at: "2024-03-10T12:00:00.000000+00:00",
+    updated_at: "2024-03-10T12:05:00.000000+00:00",
+    chat_messages: [
+      {
+        // no uuid — fallback ID uses index 0
+        sender: "human",
+        created_at: "2024-03-10T12:00:00.000000+00:00",
+        updated_at: "2024-03-10T12:00:00.000000+00:00",
+        text: "Tell me a joke.",
+        content: [{ type: "text", text: "Tell me a joke." }],
+      },
+      {
+        // no uuid — fallback ID uses index 1
+        sender: "assistant",
+        created_at: "2024-03-10T12:01:00.000000+00:00",
+        updated_at: "2024-03-10T12:01:00.000000+00:00",
+        text: "Why did the chicken cross the road? To get to the other side.",
+        content: [{ type: "text", text: "Why did the chicken cross the road? To get to the other side." }],
+      },
+      {
+        // no uuid — same content as index 0, but index 2 → different fallback ID
+        sender: "human",
+        created_at: "2024-03-10T12:02:00.000000+00:00",
+        updated_at: "2024-03-10T12:02:00.000000+00:00",
+        text: "Tell me a joke.",
+        content: [{ type: "text", text: "Tell me a joke." }],
+      },
+      {
+        // no uuid — same content as index 1, but index 3 → different fallback ID
+        sender: "assistant",
+        created_at: "2024-03-10T12:03:00.000000+00:00",
+        updated_at: "2024-03-10T12:03:00.000000+00:00",
+        text: "Why did the chicken cross the road? To get to the other side.",
+        content: [{ type: "text", text: "Why did the chicken cross the road? To get to the other side." }],
+      },
+    ],
+  },
+];
+
+// Parse and confirm 4 distinct IDs are generated despite identical content.
+const repeatedConvs = parseClaudeExport(repeatedRaw);
+assert("repeated conv has 4 messages", repeatedConvs[0].messages.length === 4,
+  `got ${repeatedConvs[0].messages.length}`);
+
+const [rm0, rm1, rm2, rm3] = repeatedConvs[0].messages;
+assert("msg 0 role = user",  rm0.role === "user");
+assert("msg 1 role = assistant", rm1.role === "assistant");
+assert("msg 2 role = user",  rm2.role === "user");
+assert("msg 3 role = assistant", rm3.role === "assistant");
+assert("msg 0 and msg 2 have same content",  rm0.content === rm2.content);
+assert("msg 1 and msg 3 have same content",  rm1.content === rm3.content);
+assert("msg 0 and msg 2 have different IDs", rm0.id !== rm2.id,
+  `both got "${rm0.id}"`);
+assert("msg 1 and msg 3 have different IDs", rm1.id !== rm3.id,
+  `both got "${rm1.id}"`);
+assert("all 4 IDs are unique", new Set([rm0.id, rm1.id, rm2.id, rm3.id]).size === 4,
+  `IDs: ${[rm0.id, rm1.id, rm2.id, rm3.id].join(", ")}`);
+
+// First import into a fresh in-memory DB — all 4 messages must be stored.
+const dbRepeat: StoredConversation[] = [];
+function findRepeatConv(eid: string) { return dbRepeat.find(c => c.external_id === eid); }
+
+function simulateRepeatImport(parsed: unknown) {
+  const convs = parseClaudeExport(parsed);
+  let newCount = 0, updatedCount = 0, skippedCount = 0;
+  for (const conv of convs) {
+    const existing = findRepeatConv(conv.externalId);
+    if (existing) {
+      const newMsgs = dedupeMessages(conv.messages,
+        existing.messages.map(m => ({ external_id: m.external_id, content_hash: m.content_hash })));
+      if (newMsgs.length > 0) {
+        existing.messages.push(...newMsgs.map(m => ({
+          external_id: m.id, content_hash: m.contentHash, role: m.role, content: m.content,
+        })));
+        updatedCount++;
+      } else { skippedCount++; }
+    } else {
+      const unique = dedupeMessages(conv.messages, []);
+      dbRepeat.push({
+        id: `dbr-${dbRepeat.length + 1}`,
+        external_id: conv.externalId,
+        display_title: conv.title,
+        messages: unique.map(m => ({
+          external_id: m.id, content_hash: m.contentHash, role: m.role, content: m.content,
+        })),
+      });
+      newCount++;
+    }
+  }
+  return { newCount, updatedCount, skippedCount };
+}
+
+const runR1 = simulateRepeatImport(repeatedRaw);
+assert("first import: newCount = 1",     runR1.newCount === 1,     `got ${runR1.newCount}`);
+assert("first import: updatedCount = 0", runR1.updatedCount === 0, `got ${runR1.updatedCount}`);
+assert("first import: skippedCount = 0", runR1.skippedCount === 0, `got ${runR1.skippedCount}`);
+assert("all 4 repeated messages stored", dbRepeat[0].messages.length === 4,
+  `got ${dbRepeat[0].messages.length}`);
+assert("stored msg 0 content correct",
+  dbRepeat[0].messages[0].content === "Tell me a joke.");
+assert("stored msg 2 content is also 'Tell me a joke.'",
+  dbRepeat[0].messages[2].content === "Tell me a joke.");
+assert("msg 0 and msg 2 have different stored IDs",
+  dbRepeat[0].messages[0].external_id !== dbRepeat[0].messages[2].external_id);
+
+console.log("\nTest: Repeated identical messages — re-import produces no duplicates");
+const runR2 = simulateRepeatImport(repeatedRaw);
+assert("re-import: newCount = 0",     runR2.newCount === 0,     `got ${runR2.newCount}`);
+assert("re-import: updatedCount = 0", runR2.updatedCount === 0, `got ${runR2.updatedCount}`);
+assert("re-import: skippedCount = 1", runR2.skippedCount === 1, `got ${runR2.skippedCount}`);
+assert("still exactly 4 messages after re-import", dbRepeat[0].messages.length === 4,
+  `got ${dbRepeat[0].messages.length}`);
 
 // ---------------------------------------------------------------------------
 // Summary
