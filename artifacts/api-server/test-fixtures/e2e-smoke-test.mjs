@@ -21,6 +21,7 @@ const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const API = "http://localhost:80/api";
 const FIXTURE = join(__dirname, "sample-conversations.json");
 const CLAUDE_FIXTURE = join(__dirname, "sample-claude-conversations.json");
+const GEMINI_FIXTURE = join(__dirname, "sample-gemini-activity.html");
 
 if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
   console.error("Missing required env vars: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY");
@@ -208,11 +209,14 @@ let firstConvId = "";
 let alphaConvId = "";
 let claudeProfileId = "";
 let claudeZipProfileId = "";
+let geminiProfileId = "";
+let geminiZipProfileId = "";
 
 const fixtureData = readFileSync(FIXTURE);
 const fixtureJson = JSON.parse(fixtureData.toString());
 const claudeFixtureData = readFileSync(CLAUDE_FIXTURE);
 const claudeFixtureJson = JSON.parse(claudeFixtureData.toString());
+const geminiFixtureData = readFileSync(GEMINI_FIXTURE);
 
 async function main() {
   // ── Step 1: Sign up / sign in ────────────────────────────────────────────
@@ -534,12 +538,106 @@ async function main() {
   assertEq("Claude ZIP import failed_count=0", d19?.failed_count, 0);
   if (d19?.errors?.length) console.log("  Claude ZIP errors:", d19.errors);
 
+  // ── Steps 20–24: Gemini import tests ─────────────────────────────────────
+
+  // ── Step 20: Create Gemini profile ───────────────────────────────────────
+  console.log("\n=== Step 20: Create Gemini profile ===");
+  const { status: s20, data: d20 } = await api("POST", "/profiles", {
+    auth: token, json: { name: "TestGemini", provider: "gemini" },
+  });
+  geminiProfileId = d20?.id || "";
+  assertEq("Create Gemini profile HTTP 201", s20, 201);
+  assertTruthy("Gemini profile ID returned", geminiProfileId, JSON.stringify(d20));
+
+  // ── Step 21: First Gemini import (raw HTML) ───────────────────────────────
+  console.log("\n=== Step 21: First Gemini import (MyActivity.html) ===");
+  const { status: s21, data: d21 } = await uploadFile(
+    token, geminiProfileId, "gemini", geminiFixtureData, "MyActivity.html", "text/html"
+  );
+  assertEq("Gemini import 1 HTTP 200", s21, 200);
+  assertEq("Gemini import 1 status=completed", d21?.status, "completed");
+  assertEq("Gemini import 1 new_count=2", d21?.new_count, 2);
+  assertEq("Gemini import 1 skipped_count=0", d21?.skipped_count, 0);
+  assertEq("Gemini import 1 failed_count=0", d21?.failed_count, 0);
+  if (d21?.errors?.length) console.log("  Errors:", d21.errors);
+
+  // Verify DB rows
+  const { data: d21v } = await api("GET", `/conversations?profileId=${geminiProfileId}`, { auth: token });
+  assertEq("Gemini: 2 conversations in DB", d21v?.total, 2);
+  const geminiConv1Id = d21v?.conversations?.[0]?.id || "";
+  assertTruthy("Gemini first conversation ID present", geminiConv1Id);
+  const geminiAllHaveStorage = d21v?.conversations?.every(c => c.storage_path);
+  assertTruthy("Gemini: all conversations have storage_path", geminiAllHaveStorage);
+  console.log(`  Titles: ${d21v?.conversations?.map(c => c.display_title).join(" | ")}`);
+
+  // Verify markdown content
+  const { data: d21md } = await api("GET", `/conversations/${geminiConv1Id}`, { auth: token });
+  assertTruthy("Gemini markdown present", d21md?.markdown_content, "null or empty");
+  assertTruthy("Gemini markdown starts with # title", d21md?.markdown_content?.startsWith("# "));
+  assertTruthy("Gemini markdown contains *Provider: Gemini*", d21md?.markdown_content?.includes("*Provider: Gemini*"));
+  assertTruthy("Gemini markdown contains **You**", d21md?.markdown_content?.includes("**You**"));
+  assertTruthy("Gemini markdown contains **Gemini**", d21md?.markdown_content?.includes("**Gemini**"));
+  assertTruthy("Gemini message_count >= 1", (d21md?.message_count ?? 0) >= 1, `got ${d21md?.message_count}`);
+  console.log(`  Markdown preview: ${d21md?.markdown_content?.slice(0, 80).replace(/\n/g, "\\n")}...`);
+
+  // ── Step 22: Duplicate Gemini import (all skipped) ────────────────────────
+  console.log("\n=== Step 22: Duplicate Gemini import (expect all skipped) ===");
+  const { data: d22 } = await uploadFile(
+    token, geminiProfileId, "gemini", geminiFixtureData, "MyActivity.html", "text/html"
+  );
+  assertEq("Gemini import 2 status=completed", d22?.status, "completed");
+  assertEq("Gemini import 2 new_count=0", d22?.new_count, 0);
+  assertEq("Gemini import 2 skipped_count=2", d22?.skipped_count, 2);
+  assertEq("Gemini import 2 failed_count=0", d22?.failed_count, 0);
+  const { data: d22v } = await api("GET", `/conversations?profileId=${geminiProfileId}`, { auth: token });
+  assertEq("Gemini: still exactly 2 conversations (no duplicates)", d22v?.total, 2);
+
+  // ── Step 23: Gemini library summary check ────────────────────────────────
+  console.log("\n=== Step 23: Library summary includes Gemini ===");
+  const { data: d23 } = await api("GET", "/library/summary", { auth: token });
+  const geminiStats = d23?.providers?.find(p => p.provider === "gemini");
+  assertTruthy("Gemini appears in providers", geminiStats, JSON.stringify(d23?.providers));
+  assertTruthy("Gemini conversation_count >= 2", (geminiStats?.conversation_count ?? 0) >= 2, `got ${geminiStats?.conversation_count}`);
+  console.log(`  Gemini: ${geminiStats?.profile_count} profiles, ${geminiStats?.conversation_count} conversations`);
+
+  // ── Step 24: Gemini ZIP import ────────────────────────────────────────────
+  console.log("\n=== Step 24: Gemini ZIP import (Takeout/My Activity/Gemini Apps/MyActivity.html) ===");
+  const geminiZipBuf = buildZip([
+    { name: "Takeout/My Activity/Gemini Apps/MyActivity.html", data: geminiFixtureData },
+    { name: "Takeout/My Activity/Gemini Apps/attachments/Screenshot (69).png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    { name: "Takeout/My Activity/Gemini Apps/attachments/data-abc.json", data: Buffer.from('{"x":1}') },
+    { name: "Takeout/My Activity/Search/MyActivity.html", data: Buffer.from("<html><body>not gemini</body></html>") },
+  ]);
+
+  const { status: s24p, data: d24p } = await api("POST", "/profiles", {
+    auth: token, json: { name: "TestGemini-ZIP", provider: "gemini" },
+  });
+  geminiZipProfileId = d24p?.id || "";
+  assertTruthy("Gemini ZIP profile created", geminiZipProfileId, JSON.stringify(d24p));
+
+  const { status: s24, data: d24 } = await uploadFile(
+    token, geminiZipProfileId, "gemini", geminiZipBuf, "takeout.zip", "application/zip"
+  );
+  assertEq("Gemini ZIP import HTTP 200", s24, 200);
+  assertEq("Gemini ZIP import status=completed", d24?.status, "completed");
+  assertEq("Gemini ZIP import new_count=2", d24?.new_count, 2);
+  assertEq("Gemini ZIP import failed_count=0", d24?.failed_count, 0);
+  if (d24?.errors?.length) console.log("  Gemini ZIP errors:", d24.errors);
+
+  // Verify ZIP-imported conversations match raw HTML import (same externalIds → no duplicates if imported again)
+  const { data: d24v } = await api("GET", `/conversations?profileId=${geminiZipProfileId}`, { auth: token });
+  assertEq("Gemini ZIP: 2 conversations in DB", d24v?.total, 2);
+  // Attachment files (PNG, JSON) must NOT have been imported as separate conversations
+  assertEq("Gemini ZIP: attachment files NOT imported as conversations (still 2)", d24v?.total, 2);
+
   // ── Step 14: Cleanup ──────────────────────────────────────────────────────
   console.log("\n=== Step 14: Cleanup ===");
   await api("DELETE", `/profiles/${profileId}`, { auth: token });
   await api("DELETE", `/profiles/${profileZipId}`, { auth: token });
   await api("DELETE", `/profiles/${claudeProfileId}`, { auth: token });
   await api("DELETE", `/profiles/${claudeZipProfileId}`, { auth: token });
+  await api("DELETE", `/profiles/${geminiProfileId}`, { auth: token });
+  await api("DELETE", `/profiles/${geminiZipProfileId}`, { auth: token });
   pass("Profiles deleted (cascades conversations + messages)");
 
   // ── Summary ───────────────────────────────────────────────────────────────

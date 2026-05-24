@@ -10,13 +10,18 @@ import {
   type NormalizedMessage,
 } from "../lib/chatgpt-parser";
 import { parseClaudeExport, claudeConversationToMarkdown } from "../lib/claude-parser";
+import {
+  parseGeminiActivityHtml,
+  geminiConversationToMarkdown,
+  extractGeminiHtmlFromBuffer,
+} from "../lib/gemini-parser";
 import { ListImportRunsQueryParams } from "@workspace/api-zod";
 
 const router: IRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
 
 // ---------------------------------------------------------------------------
-// ZIP / JSON extraction
+// ZIP / JSON extraction (ChatGPT + Claude)
 // ---------------------------------------------------------------------------
 
 function isZipBuffer(buffer: Buffer): boolean {
@@ -162,18 +167,18 @@ router.post(
 
     try {
       // --- Extract and parse ---
-      let parsed: unknown;
-      try {
-        parsed = await extractConversationsJson(req.file.buffer);
-      } catch (extractErr) {
-        throw extractErr; // bubble to outer catch → mark run failed
-      }
-
       let conversations: NormalizedConversation[] = [];
-      if (provider === "chatgpt") {
-        conversations = parseChatGPTExport(parsed);
-      } else if (provider === "claude") {
-        conversations = parseClaudeExport(parsed);
+
+      if (provider === "chatgpt" || provider === "claude") {
+        const parsed = await extractConversationsJson(req.file.buffer);
+        if (provider === "chatgpt") {
+          conversations = parseChatGPTExport(parsed);
+        } else {
+          conversations = parseClaudeExport(parsed);
+        }
+      } else if (provider === "gemini") {
+        const html = await extractGeminiHtmlFromBuffer(req.file.buffer);
+        conversations = parseGeminiActivityHtml(html);
       } else {
         throw new Error(`Provider '${provider}' is not yet supported`);
       }
@@ -192,10 +197,14 @@ router.post(
             .eq("external_id", externalId)
             .single();
 
-          const markdown =
-            provider === "claude"
-              ? claudeConversationToMarkdown(conv)
-              : conversationToMarkdown(conv);
+          let markdown: string;
+          if (provider === "claude") {
+            markdown = claudeConversationToMarkdown(conv);
+          } else if (provider === "gemini") {
+            markdown = geminiConversationToMarkdown(conv);
+          } else {
+            markdown = conversationToMarkdown(conv);
+          }
           const markdownBuffer = Buffer.from(markdown, "utf-8");
 
           let conversationId: string;
