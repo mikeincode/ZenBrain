@@ -212,8 +212,10 @@ const fixtureJson = JSON.parse(fixtureData.toString());
 async function main() {
   // ── Step 1: Sign up / sign in ────────────────────────────────────────────
   console.log("\n=== Step 1: Sign up / sign in ===");
-  const testEmail = "zenbrain-smoketest@example.com";
-  const testPass = "SmokeTest1234!";
+  // Override via env vars to avoid committing credentials:
+  //   E2E_TEST_EMAIL=you@example.com E2E_TEST_PASS=yourpass node e2e-smoke-test.mjs
+  const testEmail = process.env.E2E_TEST_EMAIL ?? "zenbrain-smoketest-throwaway@example.com";
+  const testPass = process.env.E2E_TEST_PASS ?? `TestOnly-${createHash("sha256").update(SUPABASE_URL).digest("hex").slice(0, 12)}`;
 
   // Use Admin API to create user with email pre-confirmed (bypasses email verification)
   const adminCreateRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users`, {
