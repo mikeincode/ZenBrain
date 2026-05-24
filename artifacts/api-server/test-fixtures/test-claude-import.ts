@@ -54,25 +54,20 @@ function dedupeMessages(
   incoming: Array<{ id: string; contentHash: string; role: string; content: string }>,
   existing: Array<{ external_id: string; content_hash: string }>
 ) {
-  // Mirror the production logic in import.ts: dedupeMessages.
-  // Cross-import: skip if id OR hash already exists in DB.
-  // Within-batch: skip only if the exact same id appears twice (preserves
-  // repeated content at different positions).
+  // Mirror production import.ts: ID-only cross-import dedup.
+  // Hash-based cross-import dedup was removed to preserve legitimately repeated
+  // messages that share content but have distinct IDs.
   const existingIds = new Set<string>();
-  const existingHashes = new Set<string>();
   for (const m of existing) {
-    if (m.external_id) existingIds.add(`id:${m.external_id}`);
-    if (m.content_hash) existingHashes.add(`hash:${m.content_hash}`);
+    if (m.external_id) existingIds.add(m.external_id);
   }
   const batchIds = new Set<string>();
   const result = [];
   for (const m of incoming) {
-    const idKey = `id:${m.id}`;
-    const hashKey = `hash:${m.contentHash}`;
-    if (existingIds.has(idKey) || existingHashes.has(hashKey)) continue;
-    if (batchIds.has(idKey)) continue;
+    if (existingIds.has(m.id)) continue;
+    if (batchIds.has(m.id)) continue;
     result.push(m);
-    batchIds.add(idKey);
+    batchIds.add(m.id);
   }
   return result;
 }
@@ -247,9 +242,9 @@ const multiBlockRaw = [
         text: "Combined text",
         content: [
           { type: "text", text: "First paragraph." },
-          { type: "tool_use", id: "tu-1", name: "search" }, // should be skipped
+          { type: "tool_use", id: "tu-1", name: "search" }, // → gets placeholder
           { type: "text", text: "Second paragraph." },
-          { type: "thinking", thinking: "internal reasoning" }, // should be skipped
+          { type: "thinking", thinking: "internal reasoning" }, // → gets placeholder
         ],
         files: [],
         attachments: [],
@@ -260,12 +255,14 @@ const multiBlockRaw = [
 const multiBlockConvs = parseClaudeExport(multiBlockRaw);
 const mbc = multiBlockConvs[0].messages[0].content;
 assert(
-  "joins multiple text blocks",
-  mbc === "First paragraph.\n\nSecond paragraph.",
+  "joins multiple text blocks with placeholders",
+  mbc === "First paragraph.\n\n[Tool use omitted]\n\nSecond paragraph.\n\n[Thinking block omitted]",
   `got "${mbc}"`
 );
-assert("skips tool_use blocks", !mbc.includes("search"));
-assert("skips thinking blocks", !mbc.includes("internal reasoning"));
+assert("tool_use block produces placeholder", mbc.includes("[Tool use omitted]"));
+assert("tool internals not leaked", !mbc.includes("search"));
+assert("thinking block produces placeholder", mbc.includes("[Thinking block omitted]"));
+assert("thinking internals not leaked", !mbc.includes("internal reasoning"));
 
 const emptyMsgRaw = [
   {
@@ -280,7 +277,7 @@ const emptyMsgRaw = [
         created_at: "2024-02-01T00:00:00.000000+00:00",
         updated_at: "2024-02-01T00:00:00.000000+00:00",
         text: "",
-        content: [{ type: "tool_use", id: "x" }], // no renderable text
+        content: [], // empty content array + empty text → truly no renderable output
         files: [],
         attachments: [],
       },
@@ -558,6 +555,197 @@ assert("re-import: updatedCount = 0", runR2.updatedCount === 0, `got ${runR2.upd
 assert("re-import: skippedCount = 1", runR2.skippedCount === 1, `got ${runR2.skippedCount}`);
 assert("still exactly 4 messages after re-import", dbRepeat[0].messages.length === 4,
   `got ${dbRepeat[0].messages.length}`);
+
+// ---------------------------------------------------------------------------
+// Tests: non-text block placeholders (comprehensive)
+// ---------------------------------------------------------------------------
+
+console.log("\nTest: Claude non-text block placeholders");
+const placeholderRaw = [
+  {
+    uuid: "claude-placeholder-conv",
+    name: "Placeholder Conv",
+    created_at: "2024-04-01T00:00:00.000000+00:00",
+    updated_at: "2024-04-01T00:01:00.000000+00:00",
+    chat_messages: [
+      {
+        uuid: "ph-msg-001",
+        sender: "assistant",
+        created_at: "2024-04-01T00:01:00.000000+00:00",
+        updated_at: "2024-04-01T00:01:00.000000+00:00",
+        text: "",
+        content: [
+          { type: "thinking", thinking: "Let me reason step by step." },
+          { type: "text", text: "Here is my answer." },
+          { type: "tool_use", id: "tool-001", name: "calculator", input: { expr: "2+2" } },
+          { type: "tool_result", tool_use_id: "tool-001", content: "4" },
+        ],
+        files: [],
+        attachments: [],
+      },
+    ],
+  },
+];
+const placeholderConvs = parseClaudeExport(placeholderRaw);
+assert(
+  "placeholder conv has 1 message",
+  placeholderConvs[0].messages.length === 1,
+  `got ${placeholderConvs[0].messages.length}`
+);
+const pc = placeholderConvs[0].messages[0].content;
+assert("thinking block gets placeholder", pc.includes("[Thinking block omitted]"), `got: "${pc}"`);
+assert("thinking internals not in output", !pc.includes("step by step"));
+assert("text content preserved",          pc.includes("Here is my answer."),        `got: "${pc}"`);
+assert("tool_use gets placeholder",        pc.includes("[Tool use omitted]"),         `got: "${pc}"`);
+assert("tool name not leaked",             !pc.includes("calculator"));
+assert("tool_result gets placeholder",     pc.includes("[Tool result omitted]"),      `got: "${pc}"`);
+assert("tool result value not leaked",     !pc.includes('"4"'));
+
+// File attachment placeholder via the message-level "files" array.
+const fileAttachRaw = [
+  {
+    uuid: "claude-file-attach-conv",
+    name: "File Attach Conv",
+    created_at: "2024-04-02T00:00:00.000000+00:00",
+    updated_at: "2024-04-02T00:00:00.000000+00:00",
+    chat_messages: [
+      {
+        uuid: "fa-msg-001",
+        sender: "human",
+        created_at: "2024-04-02T00:00:00.000000+00:00",
+        updated_at: "2024-04-02T00:00:00.000000+00:00",
+        text: "See attached.",
+        content: [{ type: "text", text: "See attached." }],
+        files: [
+          { file_name: "report.pdf", file_type: "application/pdf", extracted_content: "..." },
+          { file_name: "photo.jpg",  file_type: "image/jpeg" },
+        ],
+        attachments: [],
+      },
+    ],
+  },
+];
+const fileAttachConvs = parseClaudeExport(fileAttachRaw);
+const fac = fileAttachConvs[0].messages[0].content;
+assert("text before attachments preserved", fac.includes("See attached."), `got: "${fac}"`);
+assert("pdf file gets File attachment placeholder",   fac.includes("[File attachment]"),  `got: "${fac}"`);
+assert("image file gets Image attachment placeholder", fac.includes("[Image attachment]"), `got: "${fac}"`);
+
+// ---------------------------------------------------------------------------
+// Tests: repeated identical message appended on a later import is preserved
+// ---------------------------------------------------------------------------
+//
+// Scenario: first export has [A, B]. A later export adds C where content(C) ==
+// content(A) but C has a fresh UUID. With hash-based cross-import dedup C would
+// have been incorrectly skipped. With ID-only dedup it is correctly imported.
+
+console.log("\nTest: Claude repeated-content message appended on later import");
+
+const laterBase = [
+  {
+    uuid: "lr-conv-001",
+    name: "Later Repeat Conv",
+    created_at: "2024-05-01T00:00:00.000000+00:00",
+    updated_at: "2024-05-01T00:05:00.000000+00:00",
+    chat_messages: [
+      {
+        uuid: "lr-msg-001",
+        sender: "human",
+        created_at: "2024-05-01T00:01:00.000000+00:00",
+        updated_at: "2024-05-01T00:01:00.000000+00:00",
+        text: "Hello",
+        content: [{ type: "text", text: "Hello" }],
+        files: [],
+        attachments: [],
+      },
+      {
+        uuid: "lr-msg-002",
+        sender: "assistant",
+        created_at: "2024-05-01T00:02:00.000000+00:00",
+        updated_at: "2024-05-01T00:02:00.000000+00:00",
+        text: "Hi there!",
+        content: [{ type: "text", text: "Hi there!" }],
+        files: [],
+        attachments: [],
+      },
+    ],
+  },
+];
+
+// Later export: same two messages PLUS a new one with content == msg-001.
+const laterModified = [
+  {
+    ...laterBase[0],
+    updated_at: "2024-05-01T00:10:00.000000+00:00",
+    chat_messages: [
+      ...laterBase[0].chat_messages,
+      {
+        uuid: "lr-msg-003", // NEW uuid — different from lr-msg-001
+        sender: "human",
+        created_at: "2024-05-01T00:09:00.000000+00:00",
+        updated_at: "2024-05-01T00:09:00.000000+00:00",
+        text: "Hello",           // identical content to lr-msg-001
+        content: [{ type: "text", text: "Hello" }],
+        files: [],
+        attachments: [],
+      },
+    ],
+  },
+];
+
+const dbLR: StoredConversation[] = [];
+function findLRConv(eid: string) { return dbLR.find(c => c.external_id === eid); }
+function simulateLRImport(parsed: unknown) {
+  const convs = parseClaudeExport(parsed);
+  let newCount = 0, updatedCount = 0, skippedCount = 0;
+  for (const conv of convs) {
+    const existing = findLRConv(conv.externalId);
+    if (existing) {
+      const newMsgs = dedupeMessages(conv.messages,
+        existing.messages.map(m => ({ external_id: m.external_id, content_hash: m.content_hash })));
+      if (newMsgs.length > 0) {
+        existing.messages.push(...newMsgs.map(m => ({
+          external_id: m.id, content_hash: m.contentHash, role: m.role, content: m.content,
+        })));
+        updatedCount++;
+      } else { skippedCount++; }
+    } else {
+      const unique = dedupeMessages(conv.messages, []);
+      dbLR.push({
+        id: `dblr-${dbLR.length + 1}`,
+        external_id: conv.externalId,
+        display_title: conv.title,
+        messages: unique.map(m => ({
+          external_id: m.id, content_hash: m.contentHash, role: m.role, content: m.content,
+        })),
+      });
+      newCount++;
+    }
+  }
+  return { newCount, updatedCount, skippedCount };
+}
+
+const lrRun1 = simulateLRImport(laterBase);
+assert("LR run1: newCount = 1",     lrRun1.newCount === 1,     `got ${lrRun1.newCount}`);
+assert("LR run1: 2 messages stored", dbLR[0].messages.length === 2, `got ${dbLR[0].messages.length}`);
+
+const lrRun2 = simulateLRImport(laterModified);
+assert("LR run2: updatedCount = 1",    lrRun2.updatedCount === 1, `got ${lrRun2.updatedCount}`);
+assert("LR run2: skippedCount = 0",    lrRun2.skippedCount === 0, `got ${lrRun2.skippedCount}`);
+assert("LR run2: now 3 messages",      dbLR[0].messages.length === 3, `got ${dbLR[0].messages.length}`);
+assert("LR run2: msg-003 stored",
+  dbLR[0].messages[2].external_id === "lr-msg-003",
+  `got "${dbLR[0].messages[2].external_id}"`);
+assert("LR run2: content correct",
+  dbLR[0].messages[2].content === "Hello",
+  `got "${dbLR[0].messages[2].content}"`);
+assert("LR run2: msg-001 and msg-003 are distinct stored entries",
+  dbLR[0].messages[0].external_id !== dbLR[0].messages[2].external_id);
+
+const lrRun3 = simulateLRImport(laterModified);
+assert("LR run3 (re-import): updatedCount = 0", lrRun3.updatedCount === 0, `got ${lrRun3.updatedCount}`);
+assert("LR run3 (re-import): skippedCount = 1", lrRun3.skippedCount === 1, `got ${lrRun3.skippedCount}`);
+assert("LR run3 (re-import): still 3 messages",  dbLR[0].messages.length === 3, `got ${dbLR[0].messages.length}`);
 
 // ---------------------------------------------------------------------------
 // Summary

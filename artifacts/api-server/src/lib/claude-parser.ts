@@ -1,4 +1,4 @@
-import { sha256, type NormalizedConversation, type NormalizedMessage } from "./chatgpt-parser";
+import { sha256, type NormalizedConversation, type NormalizedMessage } from "./normalized";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -16,6 +16,11 @@ function mapClaudeRole(sender: string): "user" | "assistant" | "system" | "tool"
       return "user";
     case "assistant":
       return "assistant";
+    case "system":
+      return "system";
+    case "tool":
+    case "tool_result":
+      return "tool";
     default:
       return "assistant";
   }
@@ -23,26 +28,77 @@ function mapClaudeRole(sender: string): "user" | "assistant" | "system" | "tool"
 
 /**
  * Extract renderable text from a Claude message.
- * Prefers structured content blocks; falls back to the top-level text field.
- * Skips tool_use, tool_result, and thinking blocks — they are not readable prose.
+ *
+ * Content block types handled:
+ *  - "text"        → rendered as-is
+ *  - "thinking"    → "[Thinking block omitted]"
+ *  - "tool_use"    → "[Tool use omitted]"
+ *  - "tool_result" → "[Tool result omitted]"
+ *  - anything else → "[<type> block omitted]" if type is a non-empty string,
+ *                    otherwise silently skipped
+ *
+ * Falls back to the top-level "text" field when the content array is absent
+ * or yields no renderable output.
+ *
+ * Attachments in the message-level "files" array are appended as
+ * "[Image attachment]" or "[File attachment]" placeholders.
  */
 function extractClaudeContent(msg: Record<string, unknown>): string {
+  const parts: string[] = [];
+
   const content = msg["content"];
   if (Array.isArray(content) && content.length > 0) {
-    const parts: string[] = [];
     for (const block of content) {
       if (!block || typeof block !== "object") continue;
       const b = block as Record<string, unknown>;
-      if (b["type"] === "text" && typeof b["text"] === "string") {
-        parts.push(b["text"]);
+      const type = typeof b["type"] === "string" ? b["type"] : "";
+
+      switch (type) {
+        case "text":
+          if (typeof b["text"] === "string" && b["text"].trim()) {
+            parts.push(b["text"]);
+          }
+          break;
+        case "thinking":
+          parts.push("[Thinking block omitted]");
+          break;
+        case "tool_use":
+          parts.push("[Tool use omitted]");
+          break;
+        case "tool_result":
+          parts.push("[Tool result omitted]");
+          break;
+        default:
+          if (type) parts.push(`[${type} block omitted]`);
       }
     }
-    if (parts.length > 0) return parts.join("\n\n");
   }
-  if (typeof msg["text"] === "string" && msg["text"].trim()) {
-    return msg["text"];
+
+  // Fall back to top-level text field if content blocks yielded nothing.
+  if (parts.length === 0 && typeof msg["text"] === "string" && msg["text"].trim()) {
+    parts.push(msg["text"]);
   }
-  return "";
+
+  // Append file/image attachment placeholders from the message-level files array.
+  const files = msg["files"];
+  if (Array.isArray(files)) {
+    for (const f of files) {
+      if (!f || typeof f !== "object") continue;
+      const file = f as Record<string, unknown>;
+      const fileType =
+        typeof file["file_type"] === "string" ? file["file_type"] : "";
+      if (fileType.startsWith("image/")) {
+        parts.push("[Image attachment]");
+      } else if (
+        typeof file["file_name"] === "string" ||
+        typeof file["extracted_content"] === "string"
+      ) {
+        parts.push("[File attachment]");
+      }
+    }
+  }
+
+  return parts.join("\n\n");
 }
 
 function deterministicExternalId(
@@ -66,7 +122,7 @@ function deterministicExternalId(
  *
  * Claude format:
  *   Array of { uuid, name, created_at (ISO), updated_at (ISO),
- *               chat_messages: [{ uuid, sender, created_at, content: [{type,text}], text }] }
+ *               chat_messages: [{ uuid, sender, created_at, content: [{type,…}], text }] }
  */
 export function parseClaudeExport(raw: unknown): NormalizedConversation[] {
   if (!Array.isArray(raw)) {
@@ -93,17 +149,15 @@ export function parseClaudeExport(raw: unknown): NormalizedConversation[] {
     const messages: NormalizedMessage[] = [];
 
     // Stable conversation key for message fallback IDs.
-    // If the conversation has a uuid, use it directly.
-    // Otherwise derive one from title + created_at so it is stable across re-imports.
+    // Uses uuid if present; otherwise derives from title + created_at.
     const convKey =
-      typeof c["uuid"] === "string" && c["uuid"].trim()
-        ? c["uuid"].trim()
-        : sha256(
-            [
-              typeof c["name"] === "string" ? c["name"] : "",
-              typeof c["created_at"] === "string" ? c["created_at"] : "",
-            ].join("|")
-          ).slice(0, 16);
+      rawId ??
+      sha256(
+        [
+          typeof c["name"] === "string" ? c["name"] : "",
+          typeof c["created_at"] === "string" ? c["created_at"] : "",
+        ].join("|")
+      ).slice(0, 16);
 
     const chatMessages = c["chat_messages"];
     if (Array.isArray(chatMessages)) {
@@ -129,7 +183,7 @@ export function parseClaudeExport(raw: unknown): NormalizedConversation[] {
         // ISO timestamp (if present), and content hash.
         // Using the array index makes two identical messages at different
         // positions in the same conversation produce distinct IDs, preventing
-        // valid repeated messages from being collapsed during dedup.
+        // legitimate repeated messages from being collapsed during dedup.
         const id =
           msgId ??
           sha256(
@@ -204,6 +258,15 @@ export function claudeConversationToMarkdown(conv: NormalizedConversation): stri
 
     lines.push(`### ${roleLabel}`);
     lines.push("");
+
+    // Per-message timestamp when available.
+    if (msg.timestamp) {
+      const ts =
+        new Date(msg.timestamp * 1000).toISOString().replace("T", " ").split(".")[0] + " UTC";
+      lines.push(`*${ts}*`);
+      lines.push("");
+    }
+
     lines.push(msg.content);
     lines.push("");
     lines.push("---");

@@ -53,17 +53,20 @@ function dedupeMessages(
   incoming: Array<{ id: string; contentHash: string; role: string; content: string }>,
   existing: Array<{ external_id: string; content_hash: string }>
 ) {
-  const seen = new Set<string>();
+  // Mirror production import.ts: ID-only cross-import dedup.
+  // Hash-based cross-import dedup was removed to preserve legitimately repeated
+  // messages that share content but have distinct IDs.
+  const existingIds = new Set<string>();
   for (const m of existing) {
-    if (m.external_id) seen.add(`id:${m.external_id}`);
-    if (m.content_hash) seen.add(`hash:${m.content_hash}`);
+    if (m.external_id) existingIds.add(m.external_id);
   }
+  const batchIds = new Set<string>();
   const result = [];
   for (const m of incoming) {
-    if (seen.has(`id:${m.id}`) || seen.has(`hash:${m.contentHash}`)) continue;
+    if (existingIds.has(m.id)) continue;
+    if (batchIds.has(m.id)) continue;
     result.push(m);
-    seen.add(`id:${m.id}`);
-    seen.add(`hash:${m.contentHash}`);
+    batchIds.add(m.id);
   }
   return result;
 }
@@ -208,6 +211,169 @@ assert("newCount = 0", run4.newCount === 0, `got ${run4.newCount}`);
 assert("updatedCount = 0", run4.updatedCount === 0, `got ${run4.updatedCount}`);
 assert("skippedCount = 2", run4.skippedCount === 2, `got ${run4.skippedCount}`);
 assert("alpha conv still has 3 messages (no duplicates)", db[0].messages.length === 3, `got ${db[0].messages.length}`);
+
+// ---------------------------------------------------------------------------
+// Tests: mapping nodes without an id field (uses mapping key as fallback)
+// ---------------------------------------------------------------------------
+
+console.log("\nTest: ChatGPT mapping node missing node.id (uses mapping key)");
+const noNodeIdRaw = [
+  {
+    id: "conv-no-node-id",
+    title: "No Node ID Conv",
+    create_time: 1700100000,
+    update_time: 1700101000,
+    mapping: {
+      "root-key": {
+        // intentionally no id field — should use "root-key" from entries
+        parent: null,
+        children: ["child-key"],
+        message: null,
+      },
+      "child-key": {
+        // intentionally no id field — should use "child-key" from entries
+        parent: "root-key",
+        children: [],
+        message: {
+          id: "inner-msg-001",
+          author: { role: "user" },
+          create_time: 1700100100,
+          content: { parts: ["Using mapping key as fallback node ID"] },
+        },
+      },
+    },
+  },
+];
+const noNodeIdConvs = parseChatGPTExport(noNodeIdRaw);
+assert("conv parsed with missing node.id", noNodeIdConvs.length === 1);
+assert(
+  "message extracted correctly via mapping key",
+  noNodeIdConvs[0].messages.length === 1,
+  `got ${noNodeIdConvs[0].messages.length} messages`
+);
+assert(
+  "message content correct",
+  noNodeIdConvs[0].messages[0].content === "Using mapping key as fallback node ID",
+  `got "${noNodeIdConvs[0].messages[0].content}"`
+);
+assert(
+  "message id comes from inner msg.id (not the mapping key)",
+  noNodeIdConvs[0].messages[0].id === "inner-msg-001",
+  `got "${noNodeIdConvs[0].messages[0].id}"`
+);
+
+// ---------------------------------------------------------------------------
+// Tests: image_asset_pointer parts produce a placeholder
+// ---------------------------------------------------------------------------
+
+console.log("\nTest: ChatGPT image_asset_pointer placeholder");
+const imageRaw = [
+  {
+    id: "conv-image-001",
+    title: "Image Conv",
+    create_time: 1700200000,
+    update_time: 1700201000,
+    mapping: {
+      root: { id: "root", parent: null, children: ["img-msg"], message: null },
+      "img-msg": {
+        id: "img-msg",
+        parent: "root",
+        children: [],
+        message: {
+          id: "img-msg",
+          author: { role: "user" },
+          create_time: 1700200100,
+          content: {
+            content_type: "multimodal_text",
+            parts: [
+              "Look at these images:",
+              {
+                content_type: "image_asset_pointer",
+                asset_pointer: "file-service://img-a",
+                size_bytes: 1000,
+                width: 100,
+                height: 100,
+              },
+              {
+                content_type: "image_asset_pointer",
+                asset_pointer: "file-service://img-b",
+                size_bytes: 2000,
+                width: 200,
+                height: 200,
+              },
+            ],
+          },
+        },
+      },
+    },
+  },
+];
+const imageConvs = parseChatGPTExport(imageRaw);
+assert("image conv parsed", imageConvs.length === 1);
+assert("image message present", imageConvs[0].messages.length === 1);
+const imgContent = imageConvs[0].messages[0].content;
+assert(
+  "text part preserved",
+  imgContent.includes("Look at these images:"),
+  `got "${imgContent}"`
+);
+assert(
+  "image count placeholder present (2 images)",
+  imgContent.includes("[User uploaded 2 images]"),
+  `got "${imgContent}"`
+);
+assert(
+  "raw asset pointer not leaked",
+  !imgContent.includes("file-service://"),
+  `got "${imgContent}"`
+);
+
+// ---------------------------------------------------------------------------
+// Tests: model_slug metadata rendered in markdown
+// ---------------------------------------------------------------------------
+
+console.log("\nTest: ChatGPT model_slug metadata appears in markdown");
+const modelSlugRaw = [
+  {
+    id: "conv-model-001",
+    title: "Model Slug Conv",
+    create_time: 1700300000,
+    update_time: 1700301000,
+    mapping: {
+      root: { id: "root", parent: null, children: ["asst-msg"], message: null },
+      "asst-msg": {
+        id: "asst-msg",
+        parent: "root",
+        children: [],
+        message: {
+          id: "asst-msg",
+          author: { role: "assistant" },
+          create_time: 1700300100,
+          content: { parts: ["I am GPT-4."] },
+          metadata: { model_slug: "gpt-4o" },
+        },
+      },
+    },
+  },
+];
+const modelConvs = parseChatGPTExport(modelSlugRaw);
+assert("model conv parsed", modelConvs.length === 1);
+assert(
+  "model_slug extracted into metadata",
+  modelConvs[0].messages[0].metadata?.["model_slug"] === "gpt-4o",
+  `got "${modelConvs[0].messages[0].metadata?.["model_slug"]}"`
+);
+const modelMd = conversationToMarkdown(modelConvs[0]);
+assert(
+  "model_slug appears in markdown",
+  modelMd.includes("gpt-4o"),
+  `markdown preview: ${modelMd.slice(0, 300)}`
+);
+assert(
+  "model_slug prefixed with 'Model:'",
+  modelMd.includes("Model: gpt-4o"),
+  `markdown preview: ${modelMd.slice(0, 300)}`
+);
 
 // ---------------------------------------------------------------------------
 // Summary

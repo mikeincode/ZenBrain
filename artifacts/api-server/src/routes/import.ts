@@ -6,7 +6,6 @@ import { requireAuth, type AuthenticatedRequest } from "../middlewares/auth";
 import {
   parseChatGPTExport,
   conversationToMarkdown,
-  sha256,
   type NormalizedConversation,
   type NormalizedMessage,
 } from "../lib/chatgpt-parser";
@@ -83,30 +82,24 @@ function dedupeMessages(
   incoming: NormalizedMessage[],
   existing: ExistingMsgRef[]
 ): NormalizedMessage[] {
-  // Cross-import dedup: build id and hash sets from rows already in the DB.
-  // A message is skipped if its id OR content hash already exists there.
-  // Hash matching handles the edge case where IDs differ between exports but
-  // the content is identical (e.g. provider reformats IDs).
+  // Cross-import dedup: skip any incoming message whose ID is already stored.
+  // ID is the source of truth. Hash-based cross-import dedup was removed
+  // because it incorrectly collapses legitimately repeated messages — e.g. a
+  // user asking the same question twice — when one is already in the DB.
   const existingIds = new Set<string>();
-  const existingHashes = new Set<string>();
   for (const m of existing) {
-    if (m.external_id) existingIds.add(`id:${m.external_id}`);
-    if (m.content_hash) existingHashes.add(`hash:${m.content_hash}`);
+    if (m.external_id) existingIds.add(m.external_id);
   }
 
-  // Within-batch dedup: by ID only.
-  // Deliberately does NOT deduplicate by hash within the batch so that a
-  // conversation with two legitimately identical messages (same role, same
-  // text at different positions) correctly preserves both.
+  // Within-batch dedup: also by ID only, so the same message ID cannot be
+  // inserted twice from a single file (guards against malformed exports).
   const batchIds = new Set<string>();
   const result: NormalizedMessage[] = [];
   for (const m of incoming) {
-    const idKey = `id:${m.id}`;
-    const hashKey = `hash:${m.contentHash}`;
-    if (existingIds.has(idKey) || existingHashes.has(hashKey)) continue;
-    if (batchIds.has(idKey)) continue;
+    if (existingIds.has(m.id)) continue;
+    if (batchIds.has(m.id)) continue;
     result.push(m);
-    batchIds.add(idKey);
+    batchIds.add(m.id);
   }
   return result;
 }
